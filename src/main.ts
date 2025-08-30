@@ -24,6 +24,9 @@ import {
     scan,
     switchMap,
     take,
+    merge,
+    startWith,
+    timer,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -41,21 +44,69 @@ const Birb = {
 
 const Constants = {
     PIPE_WIDTH: 50,
-    TICK_RATE_MS: 500, // Might need to change this!
+    TICK_RATE_MS: 50, // Might need to change this!
+    GRAVITY: 1, // Gravity constant
+    GROUND: 400, // Ground level
+    CEILING: 0, // Ceiling level
+    SEED: 1234, // Random seed
+    JUMP_SPEED: -5,
+    PIPE_SPEED: 8,
 } as const;
+
+abstract class RNG {
+    private static m = 0x80000000; // 2^31
+    private static a = 1103515245;
+    private static c = 12345;
+
+    public static hash = (seed: number): number =>
+        (RNG.a * seed + RNG.c) % RNG.m;
+
+    public static scale = (hash: number): number =>
+        (2 * hash) / (RNG.m - 1) - 1; // in [-1, 1]
+}
 
 // User input
 
 type Key = "Space";
 
+// Pipes
+type Pipe = {
+    gapY: number;
+    gapHeight: number;
+    delay: number;
+    x: number;
+};
+
 // State processing
 
 type State = Readonly<{
-    gameEnd: boolean;
+    gameEnd: boolean; // game end flag
+    gameStart: boolean;
+    position: number; // y-coordinate of the bird
+    velocity: number; // vertical velocity of the bird
+    lives: number; // number of remaining lives
+    seed: number; // random seed
+    score: number; // current score
+    resume: boolean; // resume flag
+    fullScore: number;
+    pipes: Pipe[]; // array of pipes
+    time: number;
+    pause: boolean;
 }>;
 
 const initialState: State = {
-    gameEnd: false,
+    gameEnd: false, // game ends or not
+    gameStart: false, // game has started or not
+    position: Constants.GROUND / 2, // begins with bird being at center vertically
+    velocity: 0, // initial velocity is 0
+    lives: 1, // total lives: 3
+    score: 0, // initial score
+    seed: Constants.SEED, // initialize the random seed
+    resume: false, // initial resume flag
+    fullScore: 0, // total number of pipes
+    pipes: [], // start with empty array
+    time: 0, // initialize time(s)
+    pause: false, // game not paused initially
 };
 
 /**
@@ -64,7 +115,71 @@ const initialState: State = {
  * @param s Current state
  * @returns Updated state
  */
-const tick = (s: State) => s;
+const tick = (s: State) => {
+    // Game win, stops
+    if (s.gameEnd && s.lives > 0) return s;
+
+    // update bird position
+    const newPosition = s.position + s.velocity;
+    // update velocity
+    const newVelocity = s.velocity + Constants.GRAVITY;
+    // update seed
+    const newSeed = RNG.hash(s.seed);
+
+    // Reviving: if bird is trying to revive
+    if (s.resume) {
+        // if bird is invisible and has remaining lives, reset the bird
+        if (
+            newPosition > Constants.GROUND + 100 ||
+            newPosition < Constants.CEILING - 100
+        ) {
+            if (s.lives > 0)
+                return {
+                    ...initialState,
+                    lives: s.lives,
+                    seed: newSeed,
+                    resume: false,
+                };
+            // if the bird is dead, terminate
+            return {
+                ...s,
+                gameEnd: true,
+            };
+        }
+
+        // just let bird bounce off
+        return {
+            ...s,
+            position: newPosition,
+            velocity: newVelocity,
+        };
+    }
+
+    // Flying: check if bird hits the ground or ceil
+    if (newPosition >= Constants.GROUND || newPosition <= Constants.CEILING) {
+        if (newPosition >= Constants.GROUND)
+            return {
+                ...s,
+                position: Constants.GROUND,
+                lives: s.lives - 1,
+                seed: newSeed,
+                resume: true,
+                velocity: 5 * (RNG.scale(newSeed) - 2),
+            };
+        return {
+            ...s,
+            position: newPosition,
+            velocity: 5 * (RNG.scale(newSeed) + 2),
+            lives: s.lives - 1,
+            resume: true,
+        };
+    }
+    return {
+        ...s,
+        position: newPosition,
+        velocity: newVelocity,
+    };
+};
 
 // Rendering (side effects)
 
@@ -116,7 +231,9 @@ const createSvgElement = (
 
 const render = (): ((s: State) => void) => {
     // Canvas elements
+    const gameStart = document.querySelector("#gameStart") as SVGElement;
     const gameOver = document.querySelector("#gameOver") as SVGElement;
+    const gameWin = document.querySelector("#gameWin") as SVGElement;
     const container = document.querySelector("#main") as HTMLElement;
 
     // Text fields
@@ -129,6 +246,42 @@ const render = (): ((s: State) => void) => {
         "viewBox",
         `0 0 ${Viewport.CANVAS_WIDTH} ${Viewport.CANVAS_HEIGHT}`,
     );
+
+    // Add birb to the main grid canvas
+    const birdImg = createSvgElement(svg.namespaceURI, "image", {
+        href: "assets/birb.png",
+        x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
+        y: `${Viewport.CANVAS_HEIGHT / 2 - Birb.HEIGHT / 2}`,
+        width: `${Birb.WIDTH}`,
+        height: `${Birb.HEIGHT}`,
+    });
+
+    svg.appendChild(birdImg);
+
+    // Define a function to create a top pipe
+    const createTopPipe = (p: Pipe): SVGElement => {
+        return createSvgElement(svg.namespaceURI, "rect", {
+            x: p.x.toString(),
+            y: "0",
+            width: `${Constants.PIPE_WIDTH}`,
+            height: `${(p.gapY - p.gapHeight / 2) * Viewport.CANVAS_HEIGHT}`,
+            fill: "green",
+        });
+    };
+
+    // Define a function to create a bottom pipe
+    const createBottomPipe = (p: Pipe): SVGElement => {
+        return createSvgElement(svg.namespaceURI, "rect", {
+            x: p.x.toString(),
+            y: `${(p.gapY + p.gapHeight / 2) * Viewport.CANVAS_HEIGHT}`,
+            width: `${Constants.PIPE_WIDTH}`,
+            height: `${Viewport.CANVAS_HEIGHT - (p.gapY + p.gapHeight / 2) * Viewport.CANVAS_HEIGHT}`,
+            fill: "green",
+        });
+    };
+
+    bringToForeground(birdImg);
+
     /**
      * Renders the current state to the canvas.
      *
@@ -136,55 +289,134 @@ const render = (): ((s: State) => void) => {
      *
      * @param s Current state
      */
+
+    show(gameStart);
+
     return (s: State) => {
-        // Add birb to the main grid canvas
-        const birdImg = createSvgElement(svg.namespaceURI, "image", {
-            href: "assets/birb.png",
-            x: `${Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2}`,
-            y: `${Viewport.CANVAS_HEIGHT / 2 - Birb.HEIGHT / 2}`,
-            width: `${Birb.WIDTH}`,
-            height: `${Birb.HEIGHT}`,
-        });
-        svg.appendChild(birdImg);
-
-        // Draw a static pipe as a demonstration
-        const pipeGapY = 200; // vertical center of the gap
-        const pipeGapHeight = 100;
-
-        // Top pipe
-        const pipeTop = createSvgElement(svg.namespaceURI, "rect", {
-            x: "150",
-            y: "0",
-            width: `${Constants.PIPE_WIDTH}`,
-            height: `${pipeGapY - pipeGapHeight / 2}`,
-            fill: "green",
+        // update the position of bird
+        birdImg.setAttribute("y", `${s.position - Birb.HEIGHT / 2}`);
+        // update the position of pipes
+        const existingPipes = svg.querySelectorAll(".pipe");
+        existingPipes.forEach(pipe => pipe.remove());
+        s.pipes.forEach(pipe => {
+            const topPipe = createTopPipe(pipe);
+            const bottomPipe = createBottomPipe(pipe);
+            topPipe.classList.add("pipe");
+            bottomPipe.classList.add("pipe");
+            svg.appendChild(topPipe);
+            svg.appendChild(bottomPipe);
         });
 
-        // Bottom pipe
-        const pipeBottom = createSvgElement(svg.namespaceURI, "rect", {
-            x: "150",
-            y: `${pipeGapY + pipeGapHeight / 2}`,
-            width: `${Constants.PIPE_WIDTH}`,
-            height: `${Viewport.CANVAS_HEIGHT - (pipeGapY + pipeGapHeight / 2)}`,
-            fill: "green",
-        });
-
-        svg.appendChild(pipeTop);
-        svg.appendChild(pipeBottom);
+        // update score and lives
+        livesText.textContent = `${s.lives}`;
+        scoreText.textContent = `${s.score}`;
+        // show or hide game over
+        if (s.gameEnd) {
+            if (s.lives === 0) {
+                show(gameOver);
+            } else {
+                show(gameWin);
+            }
+        } else {
+            hide(gameOver);
+            hide(gameWin);
+        }
+        hide(gameStart);
     };
 };
 
 export const state$ = (csvContents: string): Observable<State> => {
-    /** User input */
+    //Parse csv string
+    const pipe_array = csvContents
+        .split("\n")
+        .slice(1)
+        .map(row => {
+            const [gap_y, gap_height, delay] = row.split(",");
+            return {
+                gapY: Number(gap_y),
+                gapHeight: Number(gap_height),
+                delay: Number(delay),
+            };
+        });
 
+    // Create a pipe stream
+    const pipes$ = pipe_array.map(entry =>
+        timer(entry.delay * 1000).pipe(
+            // When the timer fires, create a new pipe at the right edge of the canvas
+            map(() => (currentState: State) => {
+                const newPipe: Pipe = {
+                    gapY: Number(entry.gapY),
+                    gapHeight: Number(entry.gapHeight),
+                    delay: Number(entry.delay),
+                    x: Viewport.CANVAS_WIDTH, // Start at the right edge
+                };
+                return {
+                    ...currentState,
+                    fullScore: currentState.fullScore + 1,
+                    pipes: [...currentState.pipes, newPipe],
+                };
+            }),
+        ),
+    );
+
+    // Create a separate stream to update pipe positions
+    const movePipes$ = interval(Constants.TICK_RATE_MS).pipe(
+        map(() => (currentState: State) => {
+            // Move each pipe to the left by PIPE_SPEED
+            const updatedPipes = currentState.pipes
+                .map(pipe => ({
+                    ...pipe,
+                    x: pipe.x - Constants.PIPE_SPEED,
+                }))
+                // Remove pipes that have moved off the left edge
+                .filter(pipe => pipe.x > -Constants.PIPE_WIDTH);
+
+            if (currentState.pipes.length == 0 && currentState.fullScore > 0)
+                return {
+                    ...currentState,
+                    pipes: updatedPipes,
+                    gameEnd: true,
+                };
+            return {
+                ...currentState,
+                pipes: updatedPipes,
+            };
+        }),
+    );
+
+    /** User input */
     const key$ = fromEvent<KeyboardEvent>(document, "keypress");
     const fromKey = (keyCode: Key) =>
         key$.pipe(filter(({ code }) => code === keyCode));
 
-    /** Determines the rate of time steps */
-    const tick$ = interval(Constants.TICK_RATE_MS);
+    const jump$ = fromKey("Space").pipe(
+        // apply velocity change if the game is going on
+        map(() => (currentState: State) => {
+            if (!currentState.gameEnd && !currentState.resume)
+                return {
+                    ...currentState,
+                    velocity: Constants.JUMP_SPEED, // Fixed upward velocity
+                };
+            return currentState;
+        }),
+    );
 
-    return tick$.pipe(scan((s: State) => ({ gameEnd: false }), initialState));
+    /** Determines the rate of time steps */
+    const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
+
+    // Press R to restart game
+    const restart$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
+        filter(event => event.code === "KeyR"),
+    );
+
+    return restart$.pipe(
+        startWith(null),
+        switchMap(() =>
+            merge(jump$, tick$, ...pipes$, movePipes$).pipe(
+                scan((s: State, reducerFn) => reducerFn(s), initialState),
+            ),
+        ),
+    );
 };
 
 // The following simply runs your main function on window load.  Make sure to leave it in place.
@@ -192,7 +424,7 @@ export const state$ = (csvContents: string): Observable<State> => {
 if (typeof window !== "undefined") {
     const { protocol, hostname, port } = new URL(import.meta.url);
     const baseUrl = `${protocol}//${hostname}${port ? `:${port}` : ""}`;
-    const csvUrl = `${baseUrl}/assets/map.csv`;
+    const csvUrl = `${baseUrl}/assets/map2.csv`;
 
     // Get the file from URL
     const csv$ = fromFetch(csvUrl).pipe(

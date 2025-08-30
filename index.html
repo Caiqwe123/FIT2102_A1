@@ -7,16 +7,39 @@
         <h1>Flappy Birb</h1>
         <main id="main" class="flex col">
             <svg id="svgCanvas" width="600" height="400">
+                <g id="gameWin" visibility="hidden">
+                    <rect
+                        x="220"
+                        y="178"
+                        fill="white"
+                        height="60"
+                        width="160"
+                    ></rect>
+                    <text x="250" y="206">You Win</text>
+                    <text x="235" y="226" class="restartText">press R to restart</text>
+                </g>
                 <g id="gameOver" visibility="hidden">
                     <rect
-                        x="225"
+                        x="220"
+                        y="178"
+                        fill="white"
+                        height="60"
+                        width="160"
+                    ></rect>
+                    <text x="235" y="206">Game Over</text>
+                    <text x="235" y="226" class="restartText">press R to restart</text>
+                </g>
+                <g id="gameStart" visibility="hidden">
+                    <rect
+                        x="220"
                         y="176"
                         fill="white"
                         height="48"
-                        width="150"
+                        width="180"
                     ></rect>
-                    <text x="235" y="206">Game Over</text>
+                    <text x="235" y="206">Click to Start</text>
                 </g>
+
             </svg>
             <div id="sideBar" class="flex col">
                 <div id="info" class="flex col">
