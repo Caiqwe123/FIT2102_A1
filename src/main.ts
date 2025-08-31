@@ -88,7 +88,8 @@ type Box = {
 
 type State = Readonly<{
     gameEnd: boolean; // game end flag
-    gameStart: boolean;
+    gameStart: boolean; // game start flag
+    gamePause: boolean; // game pause flag
     position: number; // y-coordinate of the bird
     velocity: number; // vertical velocity of the bird
     lives: number; // number of remaining lives
@@ -97,6 +98,7 @@ type State = Readonly<{
     resume: boolean; // resume flag
     fullScore: number;
     pipes: Pipe[]; // array of pipes
+    all_pipes: Pipe[];
     time: number;
     pause: boolean;
 }>;
@@ -104,6 +106,7 @@ type State = Readonly<{
 const initialState: State = {
     gameEnd: false, // game ends or not
     gameStart: false, // game has started or not
+    gamePause: false,
     position: Constants.GROUND / 2, // begins with bird being at center vertically
     velocity: 0, // initial velocity is 0
     lives: 3, // total lives: 3
@@ -112,21 +115,25 @@ const initialState: State = {
     resume: false, // initial resume flag
     fullScore: 0, // total number of pipes
     pipes: [], // start with empty array
+    all_pipes: [],
     time: 0, // initialize time(s)
     pause: false, // game not paused initially
 };
 
-function isOverlap(a: Box, b: Box): boolean {
+const isOverlap = (a: Box, b: Box): boolean => {
     const aRight = a.x + a.width;
     const aBottom = a.y + a.height;
     const bRight = b.x + b.width;
     const bBottom = b.y + b.height;
 
     const result =
-        a.x >= bRight || aRight <= b.x || a.y >= bBottom || aBottom <= b.y;
+        a.x >= bRight - 15 ||
+        aRight <= b.x + 15 ||
+        a.y >= bBottom - 5 ||
+        aBottom <= b.y + 15;
 
     return !result;
-}
+};
 
 const createBox = (
     x: number,
@@ -154,8 +161,12 @@ const tick = (s: State) => {
     }
 
     // Game win, stops
-    if (s.gameEnd && s.lives > 0) return s;
-    if (s.gameStart && s.pipes.length === 0) return { ...s, gameEnd: true };
+    //if (s.gameEnd && s.lives > 0) return s;
+
+    console.log(s.score, s.fullScore);
+    if (s.gameStart && s.score === s.fullScore) return { ...s, gameEnd: true };
+
+    if (s.gamePause) return s;
 
     // update bird position
     const newPosition = s.position + s.velocity;
@@ -163,6 +174,8 @@ const tick = (s: State) => {
     const newVelocity = s.velocity + Constants.GRAVITY;
     // update seed
     const newSeed = RNG.hash(s.seed);
+    // update time
+    const newTime = s.time + Constants.TICK_RATE_MS;
 
     // Reviving: if bird is trying to revive
     if (s.resume) {
@@ -179,6 +192,9 @@ const tick = (s: State) => {
                     resume: false,
                     gameStart: true,
                     pipes: s.pipes,
+                    score: s.score,
+                    all_pipes: s.all_pipes,
+                    fullScore: s.fullScore,
                 };
             // if the bird is dead, terminate
             return {
@@ -192,6 +208,7 @@ const tick = (s: State) => {
             ...s,
             position: newPosition,
             velocity: newVelocity,
+            time: newTime,
         };
     }
 
@@ -201,6 +218,7 @@ const tick = (s: State) => {
         seed: newSeed,
         resume: true,
         velocity: 5 * (RNG.scale(newSeed) - 2),
+        time: newTime,
     } as State;
 
     const hit_top_state = {
@@ -209,6 +227,7 @@ const tick = (s: State) => {
         seed: newSeed,
         resume: true,
         velocity: 5 * (RNG.scale(newSeed) + 2),
+        time: newTime,
     } as State;
 
     const bird_box = createBox(
@@ -256,6 +275,7 @@ const tick = (s: State) => {
         ...s,
         position: newPosition,
         velocity: newVelocity,
+        time: newTime,
     };
 };
 
@@ -312,6 +332,7 @@ const render = (): ((s: State) => void) => {
     const gameStart = document.querySelector("#gameStart") as SVGElement;
     const gameOver = document.querySelector("#gameOver") as SVGElement;
     const gameWin = document.querySelector("#gameWin") as SVGElement;
+    const gamePause = document.querySelector("#gamePause") as SVGElement;
     const container = document.querySelector("#main") as HTMLElement;
 
     // Text fields
@@ -398,6 +419,8 @@ const render = (): ((s: State) => void) => {
         } else {
             hide(gameOver);
             hide(gameWin);
+            if (s.gamePause) show(gamePause);
+            else hide(gamePause);
         }
         hide(gameStart);
     };
@@ -419,20 +442,32 @@ export const state$ = (csvContents: string): Observable<State> => {
 
     // Create a pipe stream
     const pipes$ = pipe_array.map(entry =>
-        timer(entry.delay * 1000).pipe(
-            // When the timer fires, create a new pipe at the right edge of the canvas
+        interval(Constants.TICK_RATE_MS).pipe(
             map(() => (currentState: State) => {
-                const newPipe: Pipe = {
-                    gapY: Number(entry.gapY),
-                    gapHeight: Number(entry.gapHeight),
-                    delay: Number(entry.delay),
-                    x: Viewport.CANVAS_WIDTH, // Start at the right edge
-                };
-                return {
-                    ...currentState,
-                    fullScore: currentState.fullScore + 1,
-                    pipes: [...currentState.pipes, newPipe],
-                };
+                if (currentState.gamePause || currentState.gameEnd)
+                    return currentState;
+                if (currentState.time >= entry.delay * 1000) {
+                    const pipeExists = currentState.all_pipes.some(
+                        p =>
+                            p.gapY === entry.gapY &&
+                            p.gapHeight === entry.gapHeight &&
+                            p.delay === entry.delay,
+                    );
+                    if (!pipeExists) {
+                        const newPipe: Pipe = {
+                            gapY: Number(entry.gapY),
+                            gapHeight: Number(entry.gapHeight),
+                            delay: Number(entry.delay),
+                            x: Viewport.CANVAS_WIDTH,
+                        };
+                        return {
+                            ...currentState,
+                            all_pipes: [...currentState.all_pipes, newPipe],
+                            fullScore: pipe_array.length,
+                        };
+                    }
+                }
+                return currentState;
             }),
         ),
     );
@@ -441,17 +476,23 @@ export const state$ = (csvContents: string): Observable<State> => {
     const movePipes$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => (currentState: State) => {
             // Move each pipe to the left by PIPE_SPEED
-            const updatedPipes = currentState.pipes
-                .map(pipe => ({
-                    ...pipe,
-                    x: pipe.x - Constants.PIPE_SPEED,
-                }))
-                // Remove pipes that have moved off the left edge
-                .filter(pipe => pipe.x > -Constants.PIPE_WIDTH);
+            const updatedPipes = currentState.all_pipes.map(pipe => ({
+                ...pipe,
+                x: pipe.x - Constants.PIPE_SPEED,
+            }));
 
+            const newScore = currentState.all_pipes.filter(
+                pipe => pipe.x - Constants.PIPE_WIDTH < currentState.score,
+            ).length;
+
+            if (currentState.gamePause) return currentState;
             return {
                 ...currentState,
-                pipes: updatedPipes,
+                all_pipes: updatedPipes,
+                pipes: updatedPipes.filter(
+                    pipe => pipe.x > -Constants.PIPE_WIDTH,
+                ),
+                score: newScore,
             };
         }),
     );
@@ -473,6 +514,13 @@ export const state$ = (csvContents: string): Observable<State> => {
         }),
     );
 
+    const pause$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
+        filter(event => event.code === "KeyP"),
+        map(() => (currentState: State) => {
+            return { ...currentState, gamePause: !currentState.gamePause };
+        }),
+    );
+
     /** Determines the rate of time steps */
     const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
 
@@ -484,7 +532,7 @@ export const state$ = (csvContents: string): Observable<State> => {
     return restart$.pipe(
         startWith(null),
         switchMap(() =>
-            merge(jump$, tick$, ...pipes$, movePipes$).pipe(
+            merge(jump$, tick$, ...pipes$, movePipes$, pause$).pipe(
                 scan((s: State, reducerFn) => reducerFn(s), initialState),
             ),
         ),
