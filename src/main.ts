@@ -77,6 +77,13 @@ type Pipe = {
     x: number;
 };
 
+type Box = {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+};
+
 // State processing
 
 type State = Readonly<{
@@ -99,7 +106,7 @@ const initialState: State = {
     gameStart: false, // game has started or not
     position: Constants.GROUND / 2, // begins with bird being at center vertically
     velocity: 0, // initial velocity is 0
-    lives: 1, // total lives: 3
+    lives: 3, // total lives: 3
     score: 0, // initial score
     seed: Constants.SEED, // initialize the random seed
     resume: false, // initial resume flag
@@ -109,6 +116,32 @@ const initialState: State = {
     pause: false, // game not paused initially
 };
 
+function isOverlap(a: Box, b: Box): boolean {
+    const aRight = a.x + a.width;
+    const aBottom = a.y + a.height;
+    const bRight = b.x + b.width;
+    const bBottom = b.y + b.height;
+
+    const result =
+        a.x >= bRight || aRight <= b.x || a.y >= bBottom || aBottom <= b.y;
+
+    return !result;
+}
+
+const createBox = (
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+): Box => {
+    return {
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+    };
+};
+
 /**
  * Updates the state by proceeding with one time step.
  *
@@ -116,8 +149,13 @@ const initialState: State = {
  * @returns Updated state
  */
 const tick = (s: State) => {
+    if (!s.gameStart && !s.gameEnd && s.pipes.length > 0) {
+        return { ...s, gameStart: true };
+    }
+
     // Game win, stops
     if (s.gameEnd && s.lives > 0) return s;
+    if (s.gameStart && s.pipes.length === 0) return { ...s, gameEnd: true };
 
     // update bird position
     const newPosition = s.position + s.velocity;
@@ -130,8 +168,8 @@ const tick = (s: State) => {
     if (s.resume) {
         // if bird is invisible and has remaining lives, reset the bird
         if (
-            newPosition > Constants.GROUND + 100 ||
-            newPosition < Constants.CEILING - 100
+            newPosition > Constants.GROUND + 50 ||
+            newPosition < Constants.CEILING - 50
         ) {
             if (s.lives > 0)
                 return {
@@ -139,6 +177,8 @@ const tick = (s: State) => {
                     lives: s.lives,
                     seed: newSeed,
                     resume: false,
+                    gameStart: true,
+                    pipes: s.pipes,
                 };
             // if the bird is dead, terminate
             return {
@@ -155,25 +195,63 @@ const tick = (s: State) => {
         };
     }
 
-    // Flying: check if bird hits the ground or ceil
-    if (newPosition >= Constants.GROUND || newPosition <= Constants.CEILING) {
-        if (newPosition >= Constants.GROUND)
-            return {
-                ...s,
-                position: Constants.GROUND,
-                lives: s.lives - 1,
-                seed: newSeed,
-                resume: true,
-                velocity: 5 * (RNG.scale(newSeed) - 2),
-            };
-        return {
-            ...s,
-            position: newPosition,
-            velocity: 5 * (RNG.scale(newSeed) + 2),
-            lives: s.lives - 1,
-            resume: true,
-        };
-    }
+    const hit_bottom_state = {
+        ...s,
+        lives: s.lives - 1,
+        seed: newSeed,
+        resume: true,
+        velocity: 5 * (RNG.scale(newSeed) - 2),
+    } as State;
+
+    const hit_top_state = {
+        ...s,
+        lives: s.lives - 1,
+        seed: newSeed,
+        resume: true,
+        velocity: 5 * (RNG.scale(newSeed) + 2),
+    } as State;
+
+    const bird_box = createBox(
+        Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2,
+        s.position,
+        Birb.WIDTH,
+        Birb.HEIGHT,
+    );
+
+    const hit_top_results = s.pipes.map(p => {
+        const top_pipe = createBox(
+            p.x,
+            0,
+            Constants.PIPE_WIDTH,
+            (p.gapY - p.gapHeight / 2) * Viewport.CANVAS_HEIGHT,
+        );
+        return isOverlap(bird_box, top_pipe);
+    });
+
+    const hit_top = hit_top_results.includes(true);
+    if (hit_top) return hit_top_state;
+
+    const hit_bottom_results = s.pipes.map(p => {
+        const bottom_pipe = createBox(
+            p.x,
+            (p.gapY + p.gapHeight / 2) * Viewport.CANVAS_HEIGHT,
+            Constants.PIPE_WIDTH,
+            Viewport.CANVAS_HEIGHT -
+                (p.gapY + p.gapHeight / 2) * Viewport.CANVAS_HEIGHT,
+        );
+        return isOverlap(bird_box, bottom_pipe);
+    });
+
+    const hit_bottom = hit_bottom_results.includes(true);
+    if (hit_bottom) return hit_bottom_state;
+
+    // Flying: check if bird hits the ground
+    if (newPosition >= Constants.GROUND) return hit_bottom_state;
+
+    // Flying: check if bird hits the ceils
+    if (newPosition <= Constants.CEILING) return hit_top_state;
+
+    // flying normally, continue with new velocity and position
     return {
         ...s,
         position: newPosition,
@@ -256,8 +334,6 @@ const render = (): ((s: State) => void) => {
         height: `${Birb.HEIGHT}`,
     });
 
-    svg.appendChild(birdImg);
-
     // Define a function to create a top pipe
     const createTopPipe = (p: Pipe): SVGElement => {
         return createSvgElement(svg.namespaceURI, "rect", {
@@ -266,6 +342,7 @@ const render = (): ((s: State) => void) => {
             width: `${Constants.PIPE_WIDTH}`,
             height: `${(p.gapY - p.gapHeight / 2) * Viewport.CANVAS_HEIGHT}`,
             fill: "green",
+            isTop: "1",
         });
     };
 
@@ -277,10 +354,9 @@ const render = (): ((s: State) => void) => {
             width: `${Constants.PIPE_WIDTH}`,
             height: `${Viewport.CANVAS_HEIGHT - (p.gapY + p.gapHeight / 2) * Viewport.CANVAS_HEIGHT}`,
             fill: "green",
+            isTop: "0",
         });
     };
-
-    bringToForeground(birdImg);
 
     /**
      * Renders the current state to the canvas.
@@ -306,6 +382,8 @@ const render = (): ((s: State) => void) => {
             svg.appendChild(topPipe);
             svg.appendChild(bottomPipe);
         });
+
+        svg.appendChild(birdImg);
 
         // update score and lives
         livesText.textContent = `${s.lives}`;
@@ -371,12 +449,6 @@ export const state$ = (csvContents: string): Observable<State> => {
                 // Remove pipes that have moved off the left edge
                 .filter(pipe => pipe.x > -Constants.PIPE_WIDTH);
 
-            if (currentState.pipes.length == 0 && currentState.fullScore > 0)
-                return {
-                    ...currentState,
-                    pipes: updatedPipes,
-                    gameEnd: true,
-                };
             return {
                 ...currentState,
                 pipes: updatedPipes,
@@ -392,7 +464,7 @@ export const state$ = (csvContents: string): Observable<State> => {
     const jump$ = fromKey("Space").pipe(
         // apply velocity change if the game is going on
         map(() => (currentState: State) => {
-            if (!currentState.gameEnd && !currentState.resume)
+            if (!currentState.resume)
                 return {
                     ...currentState,
                     velocity: Constants.JUMP_SPEED, // Fixed upward velocity
