@@ -104,3 +104,36 @@ svg rect {
     font-size: 16px;
     text-align: center;
 }
+
+#sideBar {
+    display: flex;
+    flex-direction: row; 
+    align-items: center; 
+    gap: 20px; 
+    padding: 10px;
+}
+
+#info {
+    display: flex;
+    flex-direction: column; 
+    gap: 8px; 
+}
+
+.button-group {
+    display: flex;
+    gap: 10px; 
+    padding-left: 150px;
+}
+
+#darkBtn, #lightBtn {
+    font-size: 28px;
+    padding: 10px;
+    border-radius: 5px;
+    padding-left: 20px;
+    padding-right: 20px;
+    border-width: 3px;
+}
+
+#darkBtn:hover, #lightBtn:hover {
+    background-color: #FFFFFF; 
+}

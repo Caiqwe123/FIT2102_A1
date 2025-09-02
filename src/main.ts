@@ -34,6 +34,8 @@ import { fromFetch } from "rxjs/fetch";
 const Viewport = {
     CANVAS_WIDTH: 600,
     CANVAS_HEIGHT: 400,
+    DARK: "#9A9A9A", //rgb(154,154,154) from style.CSS
+    LIGHT: "#F1F1F1",
 } as const;
 
 const Birb = {
@@ -371,11 +373,20 @@ const render = (): ((s: State) => void) => {
     const gameOver = document.querySelector("#gameOver") as SVGElement;
     const gameWin = document.querySelector("#gameWin") as SVGElement;
     const gamePause = document.querySelector("#gamePause") as SVGElement;
-    const container = document.querySelector("#main") as HTMLElement;
 
     // Text fields
     const livesText = document.querySelector("#livesText") as HTMLElement;
     const scoreText = document.querySelector("#scoreText") as HTMLElement;
+
+    // Listen to button events to switch background color
+    const darkBtn = document.querySelector("#darkBtn") as HTMLButtonElement;
+    const lightBtn = document.querySelector("#lightBtn") as HTMLButtonElement;
+    const canvas = document.querySelector("#svgCanvas") as HTMLElement;
+    const setDarkMode = () => (canvas.style.backgroundColor = Viewport.DARK);
+    const setLightMode = () => (canvas.style.backgroundColor = Viewport.LIGHT);
+    darkBtn.addEventListener("click", setDarkMode);
+    lightBtn.addEventListener("click", setLightMode);
+    setDarkMode(); // default theme: dark
 
     const svg = document.querySelector("#svgCanvas") as SVGSVGElement;
 
@@ -752,8 +763,9 @@ if (typeof window !== "undefined") {
         }),
     );
 
-    // Observable: wait for first user click
-    const click$ = fromEvent(document.body, "mousedown").pipe(take(1));
+    // Observable: wait for first user click within the canvas(instead of whole page)
+    const canvas = document.querySelector("#svgCanvas") as HTMLElement;
+    const click$ = fromEvent(canvas, "mousedown").pipe(take(1));
 
     csv$.pipe(
         switchMap(contents =>
