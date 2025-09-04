@@ -12,6 +12,7 @@
  * Document your code!
  */
 
+import { subscribe } from "diagnostics_channel";
 import "./style.css";
 
 import {
@@ -26,6 +27,8 @@ import {
     take,
     merge,
     startWith,
+    ReplaySubject,
+    of,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
 
@@ -88,6 +91,13 @@ type Box = {
     height: number;
 };
 
+// Ghost bird that stores the stamps and postions
+type Ghost = {
+    time: number;
+    y: number;
+    run: number;
+};
+
 // State processing
 type State = Readonly<{
     gameEnd: boolean; // game end flag
@@ -108,6 +118,8 @@ type State = Readonly<{
     stary: number; // y-coordinate of star
     skullx: number; // x-coordinate of skull
     skully: number; // y-coordinate of skull
+    ghosts: ReplaySubject<Ghost>; // stores ghost bird information
+    run: number; // current number of runs
 }>;
 
 const initialState: State = {
@@ -129,6 +141,8 @@ const initialState: State = {
     stary: -100, // star invisible initially
     skullx: -100, // skull invisible initially
     skully: -100, //skull invisible initially
+    ghosts: new ReplaySubject<Ghost>(), // no ghost birds at the start of a new game
+    run: 1, // start with first run
 };
 
 /**
@@ -226,6 +240,7 @@ const tick = (s: State) => {
                 return {
                     ...initialState,
                     lives: s.lives,
+                    time: newTime,
                     seed: newSeed,
                     resume: false,
                     gameStart: true,
@@ -233,10 +248,12 @@ const tick = (s: State) => {
                     score: s.score,
                     all_pipes: s.all_pipes,
                     fullScore: s.fullScore,
+                    ghosts: s.ghosts,
                 };
             // If the bird has no remaining life, game is over
             return {
                 ...s,
+                time: newTime,
                 gameEnd: true,
             };
         }
@@ -460,6 +477,36 @@ const render = (): ((s: State) => void) => {
         // Update the position of bird
         birdImg.setAttribute("y", `${s.position - Birb.HEIGHT / 2}`);
 
+        // Display ghost birds
+
+        const existingGhosts = svg.querySelectorAll(".ghost");
+        existingGhosts.forEach(bird => bird.remove());
+        s.ghosts
+            .pipe(
+                map(bird => {
+                    return bird;
+                }),
+                filter(bird => bird.time == s.time),
+                filter(bird => bird.run < s.run),
+                map(bird => {
+                    const ghostImg = createSvgElement(
+                        svg.namespaceURI,
+                        "image",
+                        {
+                            href: "assets/birb.png",
+                            x: `${Constants.BIRD_X}`,
+                            y: `${bird.y}`,
+                            width: `${Birb.WIDTH}`,
+                            height: `${Birb.HEIGHT}`,
+                            opacity: "0.5",
+                        },
+                    );
+                    ghostImg.classList.add("ghost");
+                    svg.appendChild(ghostImg);
+                }),
+            )
+            .subscribe();
+
         // Update the positions of pipes
         const existingPipes = svg.querySelectorAll(".pipe");
         existingPipes.forEach(pipe => pipe.remove());
@@ -523,7 +570,6 @@ export const state$ = (csvContents: string): Observable<State> => {
             map(() => (currentState: State) => {
                 if (currentState.gamePause || currentState.gameEnd)
                     return currentState;
-                console.log(currentState.fullScore);
                 if (currentState.fullScore == 0)
                     return {
                         ...currentState,
@@ -586,6 +632,36 @@ export const state$ = (csvContents: string): Observable<State> => {
                 ),
                 score: newScore,
             };
+        }),
+    );
+
+    /**
+     * Ghost stream
+     * Stores birds in all previous runss, and displays them in next runs.
+     */
+
+    const ghost$ = interval(Constants.TICK_RATE_MS).pipe(
+        map(() => (currentState: State) => {
+            // Stop memorizing bird positions when game is not going on
+            if (
+                !currentState.gameStart ||
+                currentState.gameEnd ||
+                currentState.gamePause
+            ) {
+                return currentState;
+            }
+            // Add current time and position to state as a future ghost
+            const new_ghosts = new ReplaySubject<Ghost>();
+            const subscription = currentState.ghosts.subscribe({
+                next: ghost => new_ghosts.next(ghost),
+            });
+            subscription.unsubscribe();
+            new_ghosts.next({
+                time: currentState.time,
+                y: currentState.position,
+                run: currentState.run,
+            });
+            return { ...currentState, ghosts: new_ghosts };
         }),
     );
 
@@ -710,6 +786,7 @@ export const state$ = (csvContents: string): Observable<State> => {
         }),
     );
 
+    // Press P to pause and resume game
     const pause$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
         filter(event => event.code === "KeyP"),
         map(() => (currentState: State) => {
@@ -720,12 +797,22 @@ export const state$ = (csvContents: string): Observable<State> => {
     /** Determines the rate of time steps */
     const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
 
-    // Press R to restart game
+    // Press R to restart game with existing ghosts
     const restart$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
         filter(event => event.code === "KeyR"),
+        map(() => (currentState: State) => {
+            return {
+                ...initialState,
+                run: currentState.run + 1,
+                ghosts: currentState.ghosts,
+            };
+        }),
     );
 
-    return restart$.pipe(
+    // Start unconditionally (a click has been made in csv$)
+    const start$ = of(null);
+
+    return start$.pipe(
         startWith(null),
         switchMap(() =>
             merge(
@@ -736,6 +823,8 @@ export const state$ = (csvContents: string): Observable<State> => {
                 pause$,
                 star$,
                 skull$,
+                ghost$,
+                restart$,
             ).pipe(scan((s: State, reducerFn) => reducerFn(s), initialState)),
         ),
     );
