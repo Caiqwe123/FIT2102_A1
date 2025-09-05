@@ -27,7 +27,8 @@ import {
     take,
     merge,
     startWith,
-    ReplaySubject,
+    EMPTY,
+    shareReplay,
     of,
 } from "rxjs";
 import { fromFetch } from "rxjs/fetch";
@@ -57,8 +58,17 @@ const Constants = {
     JUMP_SPEED: -5, // bird's jumping speed when space is pressed
     PIPE_SPEED: 8, // pipe moving speed
     BIRD_X: Viewport.CANVAS_WIDTH * 0.3 - Birb.WIDTH / 2, // bird's fixed x-coordinate
+    TOLERANCE: 20, // tolerant distance when hitting a star or a skull
+    OFFSCREEN: -100, // an off-screen position
+    PERIOD: 10000, // period of a skull/star
+    STAROCCUR: 2000, // moment when star appears
+    SKULLOCCUR: 3000, // moment when skull appears
+    STARSPPED: 10, // speed of star
+    SKULLSPEED: 10, // speed of skull
+    MAX: 100000, // a maximum number
 } as const;
 
+// Random number generator(from Applied)
 abstract class RNG {
     private static m = 0x80000000; // 2^31
     private static a = 1103515245;
@@ -117,7 +127,7 @@ type State = Readonly<{
     stary: number; // y-coordinate of star
     skullx: number; // x-coordinate of skull
     skully: number; // y-coordinate of skull
-    ghosts: ReplaySubject<Ghost>; // stores ghost bird information
+    ghosts: Observable<Ghost>; // stores ghost bird information
     run: number; // current number of runs
 }>;
 
@@ -134,11 +144,11 @@ const initialState: State = {
     fullScore: 0,
     pipes: [], // start with empty array
     time: 0,
-    starx: -100, // star invisible initially
-    stary: -100, // star invisible initially
-    skullx: -100, // skull invisible initially
-    skully: -100, //skull invisible initially
-    ghosts: new ReplaySubject<Ghost>(), // no ghost birds at the start of a new game
+    starx: Constants.OFFSCREEN, // star invisible initially
+    stary: Constants.OFFSCREEN, // star invisible initially
+    skullx: Constants.OFFSCREEN, // skull invisible initially
+    skully: Constants.OFFSCREEN, //skull invisible initially
+    ghosts: EMPTY as Observable<Ghost>, // no ghost birds at the start of a new game
     run: 1, // start with first run
 };
 
@@ -209,11 +219,18 @@ const generateRandom = (min: number, max: number, seed: number): number => {
  * @returns Updated game state
  */
 const tick = (s: State) => {
+    /* Check game state */
+
     // Start game if game not started
     if (!s.gameStart) return { ...s, gameStart: true };
 
     // Game win when full score is got and no remaining pipes
-    if (s.gameStart && s.score >= s.fullScore && s.pipes.length == 0)
+    if (
+        s.gameStart &&
+        s.score >= s.fullScore &&
+        s.lives > 0 &&
+        s.pipes.length == 0
+    )
         return { ...s, gameEnd: true };
 
     // Stop refreshing current state when game pauses or finishes
@@ -221,6 +238,8 @@ const tick = (s: State) => {
 
     // if the bird is dead, game is over
     if (s.lives <= 0) return { ...s, gameEnd: true };
+
+    /* Update values*/
 
     // update bird position
     const newPosition = s.position + s.velocity;
@@ -230,6 +249,8 @@ const tick = (s: State) => {
     const newSeed = RNG.hash(s.seed);
     // update timestamp
     const newTime = s.time + Constants.TICK_RATE_MS;
+
+    /* Define possible states*/
 
     // Normal flying state
     const normal = {
@@ -241,7 +262,7 @@ const tick = (s: State) => {
         resume: false,
     };
 
-    // Predefined collision states
+    // Predefined collision states: hit bottom
     const hit_bottom_state = {
         ...s,
         lives: s.lives - 1,
@@ -251,6 +272,7 @@ const tick = (s: State) => {
         time: newTime,
     };
 
+    // Predefined collision states: hit top
     const hit_top_state = {
         ...s,
         lives: s.lives - 1,
@@ -547,7 +569,12 @@ export const state$ = (csvContents: string): Observable<State> => {
             } as Pipe;
         });
 
-    // Create a pipe stream from Pipe array
+    /**
+     * Pipe spawning streams
+     * Spawns pipes at their designated delays
+     * Each pipe spawner emits a function that adds the pipe to state.pipes when its delay is reached
+     * Only spawns pipes when the game is active (not paused or ended)
+     */
     const pipes$ = pipe_array.map(p =>
         interval(Constants.TICK_RATE_MS).pipe(
             map(() => (currentState: State) => {
@@ -576,14 +603,17 @@ export const state$ = (csvContents: string): Observable<State> => {
         ),
     );
 
-    // Create a separate stream to update pipe positions
+    /**
+     * Pipe movement stream
+     * Moves all pipes leftward, removes off-screen pipes, and updates score when passing through pipes
+     */
     const movePipes$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => (currentState: State) => {
-            // Move each pipe to the left by PIPE_SPEED
+            // do not move pipes when the game is not going on
             if (currentState.gameEnd) return currentState;
             if (currentState.gamePause) return currentState;
 
-            // pipes with updated positions
+            // pipes with updated positions: Move each pipe to the left by PIPE_SPEED
             const movedPipes = currentState.pipes.map(pipe => ({
                 ...pipe,
                 x: pipe.x - Constants.PIPE_SPEED,
@@ -602,6 +632,7 @@ export const state$ = (csvContents: string): Observable<State> => {
                 0,
             );
 
+            // Eliminate pipes off screen
             const newPipes = movedPipes
                 .map(pipe => ({
                     ...pipe,
@@ -624,7 +655,6 @@ export const state$ = (csvContents: string): Observable<State> => {
      * Ghost stream
      * Stores birds in all previous runss, and displays them in next runs.
      */
-
     const ghost$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => (currentState: State) => {
             // Stop memorizing bird positions when game is not going on
@@ -635,18 +665,16 @@ export const state$ = (csvContents: string): Observable<State> => {
             ) {
                 return currentState;
             }
-            // Add current time and position to state as a future ghost
-            const new_ghosts = new ReplaySubject<Ghost>();
-            const subscription = currentState.ghosts.subscribe({
-                next: ghost => new_ghosts.next(ghost),
-            });
-            subscription.unsubscribe();
-            new_ghosts.next({
-                time: currentState.time,
-                y: currentState.position,
-                run: currentState.run,
-            });
-            return { ...currentState, ghosts: new_ghosts };
+            // Add current bird's timestamp and position to game state as a future ghost
+            const newGhosts$: Observable<Ghost> = merge(
+                currentState.ghosts,
+                of<Ghost>({
+                    time: currentState.time,
+                    y: currentState.position,
+                    run: currentState.run,
+                }),
+            ).pipe(shareReplay(Constants.MAX));
+            return { ...currentState, ghosts: newGhosts$ };
         }),
     );
 
@@ -657,6 +685,7 @@ export const state$ = (csvContents: string): Observable<State> => {
      */
     const star$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => (currentState: State) => {
+            // do not update star when the game is not going on
             if (
                 !currentState.gameStart ||
                 currentState.gameEnd ||
@@ -665,34 +694,35 @@ export const state$ = (csvContents: string): Observable<State> => {
                 return currentState;
             // If bird eats star, it got 1 more life
             if (
-                !currentState.resume &&
-                Math.abs(currentState.stary - currentState.position) <= 20 &&
-                Math.abs(currentState.starx - Constants.BIRD_X) <= 20
+                Math.abs(currentState.stary - currentState.position) <=
+                    Constants.TOLERANCE &&
+                Math.abs(currentState.starx - Constants.BIRD_X) <=
+                    Constants.TOLERANCE
             )
                 return {
                     ...currentState,
                     lives: currentState.lives + 1,
-                    starx: -100,
+                    starx: Constants.OFFSCREEN,
                 };
-            // Make star available every 10 seconds
-            if (currentState.time % 10000 === 3000)
+            // At time=2,12,22... seconds, the star appears at a random location every 10 seconds
+            if (currentState.time % Constants.PERIOD === Constants.STAROCCUR)
                 return {
                     ...currentState,
                     starx: generateRandom(
-                        50,
+                        Viewport.CANVAS_WIDTH / 2, // the star appears randomly on the right half of screen
                         Viewport.CANVAS_WIDTH,
                         currentState.seed,
                     ),
                     stary: generateRandom(
-                        50,
+                        0,
                         Viewport.CANVAS_HEIGHT,
-                        currentState.seed + 1,
+                        currentState.seed + RNG.hash(currentState.seed),
                     ),
                 };
             //Star moves leftward
             return {
                 ...currentState,
-                starx: currentState.starx - 10,
+                starx: currentState.starx - Constants.STARSPPED,
             };
         }),
     );
@@ -704,6 +734,7 @@ export const state$ = (csvContents: string): Observable<State> => {
      */
     const skull$ = interval(Constants.TICK_RATE_MS).pipe(
         map(() => (currentState: State) => {
+            // do not update skull when the game is not going on
             if (
                 !currentState.gameStart ||
                 currentState.gameEnd ||
@@ -713,27 +744,28 @@ export const state$ = (csvContents: string): Observable<State> => {
 
             // If bird eats skull, it immediately dies
             if (
-                !currentState.resume &&
-                Math.abs(currentState.skully - currentState.position) <= 20 &&
-                Math.abs(currentState.skullx - Constants.BIRD_X) <= 20
+                Math.abs(currentState.skully - currentState.position) <=
+                    Constants.TOLERANCE &&
+                Math.abs(currentState.skullx - Constants.BIRD_X) <=
+                    Constants.TOLERANCE
             )
                 return {
                     ...currentState,
                     resume: true,
                     lives: 0,
-                    skullx: -100,
+                    skullx: Constants.OFFSCREEN,
                 };
             // Make skull visible every 10 seconds
-            if (currentState.time % 10000 === 2000) {
+            if (currentState.time % Constants.PERIOD === Constants.SKULLOCCUR) {
                 const newSkullx = generateRandom(
-                    50,
+                    Viewport.CANVAS_WIDTH / 2, // the skull appears randomly on the right half of screen
                     Viewport.CANVAS_WIDTH,
                     currentState.seed,
                 );
                 const newSkully = generateRandom(
-                    50,
+                    0,
                     Viewport.CANVAS_HEIGHT,
-                    currentState.seed + 1,
+                    currentState.seed + RNG.hash(currentState.seed),
                 );
                 return {
                     ...currentState,
@@ -744,7 +776,7 @@ export const state$ = (csvContents: string): Observable<State> => {
             // Skull moves leftward
             return {
                 ...currentState,
-                skullx: currentState.skullx - 10,
+                skullx: currentState.skullx - Constants.SKULLSPEED,
             };
         }),
     );
@@ -754,10 +786,15 @@ export const state$ = (csvContents: string): Observable<State> => {
     const fromKey = (keyCode: Key) =>
         key$.pipe(filter(({ code }) => code === keyCode));
 
-    // Bird jumps when space is pressed
+    /**
+     * Space bar input for bird jump
+     * Applies an instantaneous upward velocity to the bird
+     * Only works if the game is currently active (not paused or ended)
+     */
     const jump$ = fromKey("Space").pipe(
         // apply velocity change if the game is going on
         map(() => (currentState: State) => {
+            // do not jump when game not going on
             if (
                 !currentState.resume &&
                 !currentState.gameEnd &&
@@ -771,7 +808,11 @@ export const state$ = (csvContents: string): Observable<State> => {
         }),
     );
 
-    // Press P to pause and resume game
+    /*
+     * P key input for pausing/unpausing the game
+     * Toggles the gamePause state
+     */
+
     const pause$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
         filter(event => event.code === "KeyP"),
         map(() => (currentState: State) => {
@@ -782,7 +823,10 @@ export const state$ = (csvContents: string): Observable<State> => {
     /** Determines the rate of time steps */
     const tick$ = interval(Constants.TICK_RATE_MS).pipe(map(() => tick));
 
-    // Press R to restart game with existing ghosts
+    /**
+     * R key input for restarting the game
+     * Resets the game state to the initial state, increments run count, and retains ghosts
+     */
     const restart$ = fromEvent<KeyboardEvent>(document, "keydown").pipe(
         filter(event => event.code === "KeyR"),
         map(() => (currentState: State) => {
@@ -820,7 +864,7 @@ export const state$ = (csvContents: string): Observable<State> => {
 if (typeof window !== "undefined") {
     const { protocol, hostname, port } = new URL(import.meta.url);
     const baseUrl = `${protocol}//${hostname}${port ? `:${port}` : ""}`;
-    const csvUrl = `${baseUrl}/assets/map2.csv`;
+    const csvUrl = `${baseUrl}/assets/map.csv`;
 
     // Get the file from URL
     const csv$ = fromFetch(csvUrl).pipe(
